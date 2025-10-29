@@ -33,15 +33,25 @@ class DefaultRowContentGenerator:
     def data_rows(self, *, headers: Sequence[str]) -> Iterable[Sequence[str]]:
         """Yield deterministic data rows ensuring every cell is populated."""
         normalized_headers = self.header_row(headers)
+        if not normalized_headers:
+            return
+        digest_unit_length = len(hashlib.sha256().hexdigest())
+        minimum_length = self._digest_length * len(normalized_headers) + digest_unit_length
+
         for row_index in count(start=1):
             row_token = f"{self._seed}-{row_index}"
+            row_digest = hashlib.sha256(row_token.encode("utf-8")).hexdigest()
+            repetitions = (minimum_length // len(row_digest)) + 2
+            fragment_pool = row_digest * repetitions
+
             yield [
-                self._build_cell_value(header, row_token, column_index)
+                self._build_cell_value(header, fragment_pool, column_index)
                 for column_index, header in enumerate(normalized_headers, start=1)
             ]
 
-    def _build_cell_value(self, header: str, row_token: str, column_index: int) -> str:
+    def _build_cell_value(self, header: str, fragment_pool: str, column_index: int) -> str:
         """Generate a high-entropy cell value for the given column."""
-        digest_input = f"{header}|{row_token}|{column_index}|{self._filler_text}"
-        digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
-        return f"{self._filler_text}-{header}-{digest[: self._digest_length]}"
+        start = (column_index - 1) * self._digest_length
+        end = start + self._digest_length
+        fragment = fragment_pool[start:end]
+        return f"{self._filler_text}-{header}-{fragment}"

@@ -47,8 +47,9 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
         sheet.append(header_row)
         tracker.register(_estimate_row_bytes(header_row))
 
-        sheet.append(["" for _ in header_row])
-        tracker.register(len(header_row) * CELL_OVERHEAD_BYTES)
+        spacer_row = ["" for _ in header_row]
+        sheet.append(spacer_row)
+        tracker.register(_estimate_row_bytes(spacer_row))
 
         progress("Starting Excel generation", percent_complete=tracker.percent_complete())
 
@@ -72,11 +73,11 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
                 break
 
         workbook.save(destination)
+        actual_bytes = destination.stat().st_size if destination.exists() else 0
         progress(
             (
                 f"Excel file saved ({rows_written:,} data rows, "
-                f"~{tracker.recorded_bytes:,} bytes estimated, "
-                f"actual {destination.stat().st_size if destination.exists() else 0:,} bytes)"
+                f"~{tracker.recorded_bytes:,} bytes estimated, actual {actual_bytes:,} bytes)"
             ),
             percent_complete=100.0,
         )

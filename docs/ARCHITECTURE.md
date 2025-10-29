@@ -12,9 +12,9 @@
 - `src/file_generator/ui/workers.py` contains QThread worker classes that execute long-running generation jobs off the GUI thread.
 - `src/file_generator/services/generation_service.py` orchestrates request validation, picks the right file generator, and coordinates progress reporting.
 - `src/file_generator/generators/base.py` declares shared interfaces and simple dataclasses used throughout the generation flow.
-- `src/file_generator/generators/excel.py` streams XLSX/XLSM output using OpenPyXL in write-only mode to keep memory usage low.
-- `src/file_generator/generators/delimited.py` writes tab-delimited output with buffered disk writes to monitor file size accurately.
-- `src/file_generator/utils/size_helpers.py` handles unit conversion (KB/MB/GB) and byte accounting; `src/file_generator/utils/rows.py` stores reusable data row helpers.
+- `src/file_generator/generators/excel.py` streams XLSX/XLSM output using OpenPyXL in write-only mode to keep memory usage low; cancellation checks fire between row batches.
+- `src/file_generator/generators/delimited.py` writes tab-delimited output using binary 4 MiB buffers so the OS handles fewer syscalls while staying memory efficient.
+- `src/file_generator/utils/size_helpers.py` handles unit conversion (KB/MB/GB) and byte accounting; `src/file_generator/utils/rows.py` stores reusable data row helpers and now hashes once per row to populate all cells quickly.
 
 ## Data Flow
 1. GUI collects user inputs, validates basic constraints, and creates a `FileGenerationRequest`.

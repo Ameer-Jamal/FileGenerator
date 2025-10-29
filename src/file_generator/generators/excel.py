@@ -17,6 +17,7 @@ from file_generator.utils.size_helpers import SizeTracker
 
 DEFAULT_PROGRESS_INTERVAL = 10_000
 CELL_OVERHEAD_BYTES = 8
+MAX_EXCEL_ROWS = 1_048_576
 
 
 def _estimate_row_bytes(row: Sequence[str]) -> int:
@@ -40,8 +41,7 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         workbook = Workbook(write_only=True)
-        sheet = workbook.active
-        sheet.title = "Data"
+        sheet = workbook.create_sheet(title="Data")
 
         header_row = list(request.row_generator.header_row(request.headers))
         sheet.append(header_row)
@@ -54,12 +54,19 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
         progress("Starting Excel generation", percent_complete=tracker.percent_complete())
 
         rows_written = 0
+        total_rows = 2  # header + spacer already appended
 
         for rows_written, row in enumerate(
             request.row_generator.data_rows(headers=request.headers), start=1
         ):
             if request.cancel_requested and request.cancel_requested():
                 raise GenerationCancelledError("Generation cancelled by user.")
+            if total_rows >= MAX_EXCEL_ROWS:
+                progress(
+                    "Excel row limit reached (1,048,576 rows); stopping early.",
+                    percent_complete=tracker.percent_complete(),
+                )
+                break
             row_list = list(row)
             sheet.append(row_list)
             tracker.register(_estimate_row_bytes(row_list))
@@ -69,11 +76,18 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
                     f"(estimated {tracker.recorded_bytes:,} bytes)",
                     percent_complete=tracker.percent_complete(),
                 )
+            total_rows += 1
             if not tracker.should_continue():
                 break
 
         workbook.save(destination)
         actual_bytes = destination.stat().st_size if destination.exists() else 0
+        if tracker.should_continue():
+            progress(
+                "Requested size not reached before hitting Excel limits; "
+                "output is smaller than requested.",
+                percent_complete=tracker.percent_complete(),
+            )
         progress(
             (
                 f"Excel file saved ({rows_written:,} data rows, "

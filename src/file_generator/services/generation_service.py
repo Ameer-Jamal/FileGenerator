@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from file_generator.generators.delimited import TabDelimitedFileGenerator
+from file_generator.generators.delimited import DelimitedFileGenerator
 from file_generator.generators.excel import ExcelFileGenerator
 from file_generator.models import FileGenerationRequest, FileGenerator, ProgressReporter
 
@@ -42,5 +42,5 @@ class GenerationService:  # pylint: disable=too-few-public-methods
 
 def create_default_service() -> GenerationService:
     """Factory providing a GenerationService with built-in generators."""
-    generators = [ExcelFileGenerator(), TabDelimitedFileGenerator()]
+    generators = [ExcelFileGenerator(), DelimitedFileGenerator()]
     return GenerationService(generators)

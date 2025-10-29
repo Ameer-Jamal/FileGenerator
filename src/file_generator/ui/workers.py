@@ -51,10 +51,11 @@ class GenerationWorker(QThread):
 
     def _progress_callback(self) -> Callable[[str, float | None], None]:
         """Provide a reporter callable that handles cooperative cancellation."""
-        def reporter(message: str, percent: float | None = None) -> None:
+
+        def reporter(message: str, percent: float | None = None, **kwargs) -> None:
             if self._cancel_requested:
                 raise GenerationCancelledError("Generation cancelled by user.")
-            value = percent if percent is not None else -1.0
+            value = percent if percent is not None else kwargs.get("percent_complete", -1.0)
             self.progress.emit(message, value)
 
         return reporter

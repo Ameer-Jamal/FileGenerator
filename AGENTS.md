@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - Keep library code in `src/file_generator/`. The PyQt bootstrap lives in `src/file_generator/app.py` and top-level widgets reside under `src/file_generator/ui/`.
 - Place reusable templates and sample payloads in `assets/` to keep the repo root uncluttered.
-- Put automated tests under `tests/`, mirroring module names (e.g., `tests/test_tab_delimited_generator.py` covers the TSV writer).
+- Put automated tests under `tests/`, mirroring module names (e.g., `tests/test_delimited_generator.py` covers the CSV/TSV writer).
 - Treat `.idea/` settings as local; commit only shared configuration that other contributors need.
 
 ## Build, Test, and Development Commands

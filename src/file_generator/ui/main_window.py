@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from shutil import disk_usage
 from typing import Iterable
 
 try:
+    from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import (
         QComboBox,
         QFileDialog,
@@ -16,9 +18,11 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QToolButton,
         QDoubleSpinBox,
         QProgressBar,
         QPlainTextEdit,
+        QSizePolicy,
         QWidget,
     )
 except ImportError as exc:  # pragma: no cover
@@ -42,7 +46,9 @@ class MainWindow(QMainWindow):
     FILE_TYPES: tuple[tuple[str, str], ...] = (
         ("xlsx", "Excel Workbook (*.xlsx)"),
         ("xlsm", "Excel Macro-Enabled Workbook (*.xlsm)"),
+        ("csv", "Comma-separated (*.csv)"),
         ("tsv", "Tab-delimited (*.tsv)"),
+        ("txt", "Tab-delimited (*.txt)"),
     )
 
     def __init__(self, service: GenerationService | None = None) -> None:
@@ -51,20 +57,25 @@ class MainWindow(QMainWindow):
         self.resize(720, 540)
 
         self._service = service or create_default_service()
+        self._settings = QSettings("FileGenerator", "GeneratorApp")
         self._worker: GenerationWorker | None = None
         self._cancel_flag = False
 
         self._setup_ui()
         self._connect_signals()
+        self._register_setting_listeners()
+        self._load_settings()
 
-    def _setup_ui(self) -> None:
+    def _setup_ui(self) -> None:  # pylint: disable=too-many-statements
         container = QWidget(self)
         layout = QFormLayout()
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         container.setLayout(layout)
 
         # Destination picker
         path_layout = QHBoxLayout()
         self.path_edit = QLineEdit()
+        self.path_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.browse_button = QPushButton("Browse…")
         path_layout.addWidget(self.path_edit)
         path_layout.addWidget(self.browse_button)
@@ -95,11 +106,33 @@ class MainWindow(QMainWindow):
             "Comma-separated headers, e.g. CustomerId, AccountNumber, CreatedAt"
         )
         self.headers_input.setFixedHeight(70)
+        self.headers_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addRow(QLabel("Header Row"), self.headers_input)
 
         # Filler text
         self.filler_input = QLineEdit("SampleValue")
-        layout.addRow(QLabel("Filler Token"), self.filler_input)
+        self.filler_input.setPlaceholderText("Prefix used to populate each generated cell value")
+        self.filler_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.filler_help_button = QToolButton()
+        self.filler_help_button.setText("?")
+        self.filler_help_button.setAutoRaise(True)
+        self.filler_help_button.setToolTip(
+            "What is a filler token? Click to learn how row values are composed."
+        )
+        self.filler_help_button.clicked.connect(self._show_filler_help)
+
+        filler_layout = QHBoxLayout()
+        filler_layout.addWidget(self.filler_input)
+        filler_layout.addWidget(self.filler_help_button)
+        filler_layout.setStretch(0, 1)
+
+        layout.addRow(QLabel("Filler Token"), filler_layout)
+
+        # Estimates display
+        self.estimate_label = QLabel("Estimates will appear once target size is set.")
+        self.estimate_label.setWordWrap(True)
+        layout.addRow(QLabel("Planning"), self.estimate_label)
 
         # Progress area
         self.progress_bar = QProgressBar()
@@ -129,6 +162,7 @@ class MainWindow(QMainWindow):
             self.unit_combo,
             self.headers_input,
             self.filler_input,
+            self.filler_help_button,
         ]
 
         self.setCentralWidget(container)
@@ -152,6 +186,7 @@ class MainWindow(QMainWindow):
         if current_path.suffix.lower() != suffix:
             new_path = current_path.with_suffix(suffix)
             self.path_edit.setText(str(new_path))
+        self._on_parameters_changed()
 
     def _browse_for_path(self) -> None:
         selected_extension = self.file_type_combo.currentData()
@@ -168,6 +203,7 @@ class MainWindow(QMainWindow):
         )
         if filename:
             self.path_edit.setText(filename)
+            self._on_parameters_changed()
 
     def _on_generate_clicked(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -195,6 +231,7 @@ class MainWindow(QMainWindow):
         self._worker.cancelled.connect(self._handle_cancelled)
         self._worker.errored.connect(self._handle_error)
         self._worker.start()
+        self._save_settings()
 
     def _on_cancel_clicked(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -228,6 +265,8 @@ class MainWindow(QMainWindow):
             raise ValueError("Target size must be greater than zero.")
 
         tolerance = max(int(target_bytes * 0.02), 5 * MIB)
+        required_bytes = target_bytes + tolerance
+        self._ensure_disk_space(destination, required_bytes)
         size_constraint = SizeConstraint(target_bytes=target_bytes, tolerance_bytes=tolerance)
 
         filler = self.filler_input.text().strip() or "SampleValue"
@@ -251,7 +290,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not running)
         self.generate_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
-        self.progress_bar.setValue(0 if not running else 0)
+        self.progress_bar.setValue(0)
         if running:
             self.progress_bar.setRange(0, 0)  # Indeterminate until we receive progress
         else:
@@ -292,10 +331,159 @@ class MainWindow(QMainWindow):
         self._cancel_flag = False
         QMessageBox.critical(self, "Error", f"Failed to generate file:\n{message}")
 
+    def _show_filler_help(self) -> None:
+        """Explain how the filler token shapes generated cell values."""
+        message_lines = [
+            "Each generated cell combines the filler token, the column name, and a hashed suffix.",
+            "",
+            "For token 'LoadTest' and column 'CustomerId' you'll see values like",
+            "`LoadTest-CustomerId-a1b2...`. Adjust the token to label or group your test data.",
+        ]
+        QMessageBox.information(self, "Filler Token", "\n".join(message_lines))
+
+    def _on_parameters_changed(self, *_: object) -> None:
+        """Persist inputs and update estimates when any parameter changes."""
+        self._save_settings()
+        self._update_estimates()
+
+    def _register_setting_listeners(self) -> None:
+        """Persist user inputs as they change so they survive app restarts."""
+        self.path_edit.textChanged.connect(self._on_parameters_changed)
+        self.headers_input.textChanged.connect(self._on_parameters_changed)
+        self.filler_input.textChanged.connect(self._on_parameters_changed)
+        self.size_spin.valueChanged.connect(self._on_parameters_changed)
+        self.unit_combo.currentIndexChanged.connect(self._on_parameters_changed)
+
+    def _load_settings(self) -> None:
+        """Restore the last-used configuration from persistent storage."""
+        self.path_edit.setText(self._settings.value("output_path", "", str))
+
+        stored_type = self._settings.value("file_type", "", str)
+        type_index = self.file_type_combo.findData(stored_type)
+        if type_index >= 0:
+            self.file_type_combo.setCurrentIndex(type_index)
+
+        stored_size = self._settings.value("target_size", None, float)
+        if stored_size is not None and stored_size > 0:
+            self.size_spin.setValue(stored_size)
+
+        stored_unit = self._settings.value("size_unit", "", str)
+        unit_index = self.unit_combo.findText(stored_unit) if stored_unit else -1
+        if unit_index >= 0:
+            self.unit_combo.setCurrentIndex(unit_index)
+
+        self.headers_input.setPlainText(self._settings.value("headers", "", str))
+        self.filler_input.setText(self._settings.value("filler_token", "SampleValue", str))
+        self._update_estimates()
+
+    def _save_settings(self, *_: object) -> None:
+        """Persist the current form values."""
+        self._settings.setValue("output_path", self.path_edit.text().strip())
+        self._settings.setValue("file_type", self.file_type_combo.currentData())
+        self._settings.setValue("target_size", float(self.size_spin.value()))
+        self._settings.setValue("size_unit", self.unit_combo.currentText())
+        self._settings.setValue("headers", self.headers_input.toPlainText().strip())
+        self._settings.setValue("filler_token", self.filler_input.text().strip())
+        self._settings.sync()
+
+    def _ensure_disk_space(self, destination: Path, required_bytes: int) -> None:
+        """Raise an error if the target location lacks sufficient disk space."""
+        parent = destination.parent if destination.parent.exists() else Path.home()
+        try:
+            usage = disk_usage(parent)
+        except FileNotFoundError as exc:
+            raise ValueError(f"Unable to read disk usage for {parent}") from exc
+
+        if required_bytes > usage.free:
+            needed = self._format_bytes(required_bytes)
+            free = self._format_bytes(usage.free)
+            raise ValueError(
+                f"Not enough free space on {parent}. Needed: {needed}; available: {free}."
+            )
+
+    def _update_estimates(self) -> None:
+        """Refresh the planning label with disk space and duration estimates."""
+        try:
+            size_value = SizeValue(
+                amount=self.size_spin.value(),
+                unit=self.unit_combo.currentText(),
+            )
+            target_bytes = size_value.to_bytes()
+        except ValueError:
+            self.estimate_label.setText("Enter a valid size and unit to compute estimates.")
+            return
+
+        if target_bytes <= 0:
+            self.estimate_label.setText("Increase the target size to view estimates.")
+            return
+
+        destination = Path(self.path_edit.text().strip() or Path.home())
+        parent = destination.parent if destination.parent.exists() else Path.home()
+
+        try:
+            usage = disk_usage(parent)
+            free_bytes = usage.free
+        except FileNotFoundError:
+            free_bytes = 0
+
+        size_human = self._format_bytes(target_bytes)
+        free_human = self._format_bytes(free_bytes)
+        duration_seconds = self._estimate_duration_seconds(target_bytes)
+        duration_text = self._format_duration(duration_seconds)
+
+        status_parts = [f"Required: {size_human}"]
+        if free_bytes:
+            status_parts.append(f"Free: {free_human}")
+            if target_bytes > free_bytes:
+                status_parts.append("Insufficient disk space")
+        else:
+            status_parts.append("Free space unavailable")
+
+        status_parts.append(f"Time est.: {duration_text}")
+        self.estimate_label.setText(" | ".join(status_parts))
+
+    def _estimate_duration_seconds(self, target_bytes: int) -> float:
+        """Estimate generation time based on file type heuristics."""
+        file_type = (self.file_type_combo.currentData() or "tsv").lower()
+        if file_type in {"csv", "tsv", "txt"}:
+            throughput = 180 * 1024 * 1024  # ~180 MiB/s for buffered TSV writes
+        else:
+            throughput = 65 * 1024 * 1024  # ~65 MiB/s for OpenPyXL write-only streaming
+        return target_bytes / throughput if throughput > 0 else 0.0
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        """Render bytes in a human-friendly unit."""
+        thresholds = [
+            (1024 ** 3, "GB"),
+            (1024 ** 2, "MB"),
+            (1024, "KB"),
+        ]
+        for factor, suffix in thresholds:
+            if value >= factor:
+                return f"{value / factor:.2f} {suffix}"
+        return f"{value} B"
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Convert seconds into a short, readable duration."""
+        if seconds < 1:
+            return "<1s"
+        minutes, secs = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        parts.append(f"{secs}s")
+        return " ".join(parts)
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API  # pylint: disable=invalid-name
         """Ensure background jobs stop before the window shuts down."""
         if self._worker and self._worker.isRunning():
             self._cancel_flag = True
             self._worker.request_cancel()
             self._worker.wait(1500)
+        self._save_settings()
         super().closeEvent(event)

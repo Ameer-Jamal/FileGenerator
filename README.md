@@ -1,6 +1,7 @@
 # File Generator GUI
 
 PyQt6 desktop application for creating very large spreadsheet-style files (`.xlsx`, `.xlsm`, `.tsv`) used to stress-test import workflows. The tool streams rows to disk, allowing you to target multi-gigabyte outputs without exhausting memory.
+<img width="962" height="566" alt="image" src="https://github.com/user-attachments/assets/6133606e-0abb-43af-b881-8bf070dbde08" />
 
 ## Quick Start
 - Create a virtual environment and install dependencies:

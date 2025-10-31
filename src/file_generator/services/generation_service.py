@@ -21,8 +21,12 @@ class GenerationService:  # pylint: disable=too-few-public-methods
 
     def generate(self, request: FileGenerationRequest, progress: ProgressReporter) -> None:
         """Look up the proper generator and execute it."""
-        if request.size_constraint.target_bytes <= 0:
+        if request.size_constraint is None and request.target_rows is None:
+            raise ValueError("Specify either a target size or target row count.")
+        if request.size_constraint is not None and request.size_constraint.target_bytes <= 0:
             raise ValueError("Target size must be greater than zero bytes.")
+        if request.target_rows is not None and request.target_rows <= 0:
+            raise ValueError("Target row count must be greater than zero.")
         if not request.headers:
             raise ValueError("At least one header value is required.")
 

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from shutil import disk_usage
-from typing import Iterable
+from typing import Iterable, Sequence
 
 try:
     from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import (
+        QButtonGroup,
         QComboBox,
         QFileDialog,
         QFormLayout,
@@ -20,6 +21,8 @@ try:
         QPushButton,
         QToolButton,
         QDoubleSpinBox,
+        QSpinBox,
+        QRadioButton,
         QProgressBar,
         QPlainTextEdit,
         QSizePolicy,
@@ -37,6 +40,8 @@ from file_generator.ui.workers import GenerationWorker
 from file_generator.utils.rows import DefaultRowContentGenerator
 from file_generator.utils.size_helpers import MIB, SizeConstraint, SizeValue
 
+MAX_EXCEL_ROWS = 1_048_576
+EXCEL_CELL_OVERHEAD = 8
 
 class MainWindow(QMainWindow):
     """PyQt6 main window responsible for coordinating user interactions."""
@@ -87,6 +92,18 @@ class MainWindow(QMainWindow):
             self.file_type_combo.addItem(description, extension)
         layout.addRow(QLabel("File Type"), self.file_type_combo)
 
+        # Target mode controls
+        mode_layout = QHBoxLayout()
+        self.size_mode_radio = QRadioButton("Target file size")
+        self.rows_mode_radio = QRadioButton("Target row count")
+        self.target_mode_group = QButtonGroup(self)
+        self.target_mode_group.addButton(self.size_mode_radio)
+        self.target_mode_group.addButton(self.rows_mode_radio)
+        self.size_mode_radio.setChecked(True)
+        mode_layout.addWidget(self.size_mode_radio)
+        mode_layout.addWidget(self.rows_mode_radio)
+        layout.addRow(QLabel("Generation Mode"), mode_layout)
+
         # Target size controls
         size_layout = QHBoxLayout()
         self.size_spin = QDoubleSpinBox()
@@ -99,6 +116,13 @@ class MainWindow(QMainWindow):
         size_layout.addWidget(self.size_spin)
         size_layout.addWidget(self.unit_combo)
         layout.addRow(QLabel("Target Size"), size_layout)
+
+        # Target row controls
+        self.rows_spin = QSpinBox()
+        self.rows_spin.setRange(1, 50_000_000)
+        self.rows_spin.setValue(100_000)
+        self.rows_spin.setEnabled(False)
+        layout.addRow(QLabel("Row Count"), self.rows_spin)
 
         # Header row input
         self.headers_input = QPlainTextEdit()
@@ -160,6 +184,9 @@ class MainWindow(QMainWindow):
             self.file_type_combo,
             self.size_spin,
             self.unit_combo,
+            self.rows_spin,
+            self.size_mode_radio,
+            self.rows_mode_radio,
             self.headers_input,
             self.filler_input,
             self.filler_help_button,
@@ -172,6 +199,8 @@ class MainWindow(QMainWindow):
         self.generate_button.clicked.connect(self._on_generate_clicked)
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
         self.file_type_combo.currentIndexChanged.connect(self._on_file_type_changed)
+        self.size_mode_radio.toggled.connect(self._on_target_mode_changed)
+        self.rows_mode_radio.toggled.connect(self._on_target_mode_changed)
 
     def _on_file_type_changed(self) -> None:
         """Ensure the destination path matches the selected extension."""
@@ -204,6 +233,10 @@ class MainWindow(QMainWindow):
         if filename:
             self.path_edit.setText(filename)
             self._on_parameters_changed()
+
+    def _on_target_mode_changed(self, *_: object) -> None:
+        self._apply_mode_ui()
+        self._on_parameters_changed()
 
     def _on_generate_clicked(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -240,6 +273,7 @@ class MainWindow(QMainWindow):
             self._worker.request_cancel()
             self.cancel_button.setEnabled(False)
 
+    # pylint: disable=too-many-locals
     def _build_request(self) -> FileGenerationRequest:
         path_str = self.path_edit.text().strip()
         if not path_str:
@@ -250,40 +284,65 @@ class MainWindow(QMainWindow):
         if selected_extension and destination.suffix.lower() != f".{selected_extension}":
             destination = destination.with_suffix(f".{selected_extension}")
             self.path_edit.setText(str(destination))
+        target_file_type = str(selected_extension or destination.suffix.lstrip(".") or "tsv")
 
-        headers_text = self.headers_input.toPlainText().strip()
-        if not headers_text:
-            raise ValueError("Provide at least one header value.")
-        raw_headers = [segment.strip() for segment in self._split_header_input(headers_text)]
-        headers = tuple(filter(None, raw_headers))
+        headers = self._parse_headers()
         if not headers:
-            raise ValueError("Header values cannot be empty.")
-
-        size_value = SizeValue(amount=self.size_spin.value(), unit=self.unit_combo.currentText())
-        target_bytes = size_value.to_bytes()
-        if target_bytes <= 0:
-            raise ValueError("Target size must be greater than zero.")
-
-        tolerance = max(int(target_bytes * 0.02), 5 * MIB)
-        required_bytes = target_bytes + tolerance
-        self._ensure_disk_space(destination, required_bytes)
-        size_constraint = SizeConstraint(target_bytes=target_bytes, tolerance_bytes=tolerance)
+            raise ValueError("Provide at least one header value.")
 
         filler = self.filler_input.text().strip() or "SampleValue"
+        size_constraint: SizeConstraint | None = None
+        target_rows: int | None = None
+        required_bytes: int | None = None
+
+        if self.size_mode_radio.isChecked():
+            size_amount = self.size_spin.value()
+            size_unit = self.unit_combo.currentText()
+            size_value = SizeValue(amount=size_amount, unit=size_unit)
+            target_bytes = size_value.to_bytes()
+            if target_bytes <= 0:
+                raise ValueError("Target size must be greater than zero.")
+            tolerance = max(int(target_bytes * 0.02), 5 * MIB)
+            required_bytes = target_bytes + tolerance
+            size_constraint = SizeConstraint(target_bytes=target_bytes, tolerance_bytes=tolerance)
+        else:
+            target_rows = int(self.rows_spin.value())
+            if target_rows <= 0:
+                raise ValueError("Target row count must be greater than zero.")
+            if self._exceeds_excel_limit(target_file_type, target_rows):
+                raise ValueError(
+                    "Excel workbooks support up to 1,048,574 data rows. Select a smaller row "
+                    "count or switch to CSV/TXT."
+                )
+            required_bytes = self._estimate_row_mode_bytes(
+                file_type=target_file_type,
+                headers=headers,
+                filler=filler,
+                row_count=target_rows,
+            )
+
+        self._ensure_disk_space(destination, required_bytes)
+
         row_generator = DefaultRowContentGenerator(filler_text=filler)
 
         return FileGenerationRequest(
             destination=destination,
-            file_type=str(selected_extension or destination.suffix.lstrip(".")),
+            file_type=target_file_type,
             headers=headers,
             row_generator=row_generator,
             size_constraint=size_constraint,
+            target_rows=target_rows,
             cancel_requested=lambda: self._cancel_flag,
         )
 
     def _split_header_input(self, text: str) -> Iterable[str]:
         normalized = text.replace("\n", ",").replace("\t", ",")
         return normalized.split(",")
+
+    def _parse_headers(self) -> tuple[str, ...]:
+        headers_text = self.headers_input.toPlainText().strip()
+        raw_headers = [segment.strip() for segment in self._split_header_input(headers_text)]
+        return tuple(filter(None, raw_headers))
 
     def _set_running_state(self, running: bool) -> None:
         for widget in self._input_widgets:
@@ -341,6 +400,12 @@ class MainWindow(QMainWindow):
         ]
         QMessageBox.information(self, "Filler Token", "\n".join(message_lines))
 
+    def _apply_mode_ui(self) -> None:
+        size_mode = self.size_mode_radio.isChecked()
+        self.size_spin.setEnabled(size_mode)
+        self.unit_combo.setEnabled(size_mode)
+        self.rows_spin.setEnabled(not size_mode)
+
     def _on_parameters_changed(self, *_: object) -> None:
         """Persist inputs and update estimates when any parameter changes."""
         self._save_settings()
@@ -353,6 +418,7 @@ class MainWindow(QMainWindow):
         self.filler_input.textChanged.connect(self._on_parameters_changed)
         self.size_spin.valueChanged.connect(self._on_parameters_changed)
         self.unit_combo.currentIndexChanged.connect(self._on_parameters_changed)
+        self.rows_spin.valueChanged.connect(self._on_parameters_changed)
 
     def _load_settings(self) -> None:
         """Restore the last-used configuration from persistent storage."""
@@ -365,12 +431,29 @@ class MainWindow(QMainWindow):
 
         stored_size = self._settings.value("target_size", None, float)
         if stored_size is not None and stored_size > 0:
+            self.size_spin.blockSignals(True)
             self.size_spin.setValue(stored_size)
+            self.size_spin.blockSignals(False)
 
         stored_unit = self._settings.value("size_unit", "", str)
         unit_index = self.unit_combo.findText(stored_unit) if stored_unit else -1
         if unit_index >= 0:
+            self.unit_combo.blockSignals(True)
             self.unit_combo.setCurrentIndex(unit_index)
+            self.unit_combo.blockSignals(False)
+
+        stored_rows = self._settings.value("target_rows", None, int)
+        if stored_rows is not None and stored_rows > 0:
+            self.rows_spin.blockSignals(True)
+            self.rows_spin.setValue(stored_rows)
+            self.rows_spin.blockSignals(False)
+
+        stored_mode = self._settings.value("target_mode", "size", str)
+        if stored_mode == "rows":
+            self.rows_mode_radio.setChecked(True)
+        else:
+            self.size_mode_radio.setChecked(True)
+        self._apply_mode_ui()
 
         self.headers_input.setPlainText(self._settings.value("headers", "", str))
         self.filler_input.setText(self._settings.value("filler_token", "SampleValue", str))
@@ -382,12 +465,18 @@ class MainWindow(QMainWindow):
         self._settings.setValue("file_type", self.file_type_combo.currentData())
         self._settings.setValue("target_size", float(self.size_spin.value()))
         self._settings.setValue("size_unit", self.unit_combo.currentText())
+        self._settings.setValue(
+            "target_mode", "rows" if self.rows_mode_radio.isChecked() else "size"
+        )
+        self._settings.setValue("target_rows", int(self.rows_spin.value()))
         self._settings.setValue("headers", self.headers_input.toPlainText().strip())
         self._settings.setValue("filler_token", self.filler_input.text().strip())
         self._settings.sync()
 
-    def _ensure_disk_space(self, destination: Path, required_bytes: int) -> None:
+    def _ensure_disk_space(self, destination: Path, required_bytes: int | None) -> None:
         """Raise an error if the target location lacks sufficient disk space."""
+        if required_bytes is None:
+            return
         parent = destination.parent if destination.parent.exists() else Path.home()
         try:
             usage = disk_usage(parent)
@@ -401,45 +490,114 @@ class MainWindow(QMainWindow):
                 f"Not enough free space on {parent}. Needed: {needed}; available: {free}."
             )
 
+    def _available_disk_bytes(self, destination: Path) -> int | None:
+        parent = destination.parent if destination.parent.exists() else Path.home()
+        try:
+            return disk_usage(parent).free
+        except FileNotFoundError:
+            return None
+
+    def _estimate_row_mode_bytes(
+        self, *, file_type: str, headers: Sequence[str], filler: str, row_count: int
+    ) -> int:
+        if row_count <= 0 or not headers:
+            return 0
+        generator = DefaultRowContentGenerator(filler_text=filler)
+        normalized_headers = tuple(generator.header_row(headers))
+        if not normalized_headers:
+            return 0
+        blank_row = ["" for _ in normalized_headers]
+
+        if file_type.lower() in {"csv", "tsv", "txt"}:
+            delimiter = "," if file_type.lower() == "csv" else "\t"
+            header_bytes = self._delimited_row_bytes(normalized_headers, delimiter)
+            blank_bytes = self._delimited_row_bytes(blank_row, delimiter)
+            first_row = next(generator.data_rows(headers=normalized_headers))
+            data_bytes = self._delimited_row_bytes(first_row, delimiter)
+        else:
+            header_bytes = self._excel_row_bytes(normalized_headers)
+            blank_bytes = self._excel_row_bytes(blank_row)
+            first_row = next(generator.data_rows(headers=normalized_headers))
+            data_bytes = self._excel_row_bytes(first_row)
+
+        return header_bytes + blank_bytes + data_bytes * row_count
+
+    @staticmethod
+    def _delimited_row_bytes(row: Sequence[str], delimiter: str) -> int:
+        if not row or all(cell == "" for cell in row):
+            return 1  # newline only
+        return len(delimiter.join(row).encode("utf-8")) + 1
+
+    @staticmethod
+    def _excel_row_bytes(row: Sequence[str]) -> int:
+        return sum(len(cell.encode("utf-8")) + EXCEL_CELL_OVERHEAD for cell in row)
+
+    @staticmethod
+    def _exceeds_excel_limit(file_type: str, row_count: int) -> bool:
+        if file_type.lower() not in {"xlsx", "xlsm"}:
+            return False
+        return row_count > (MAX_EXCEL_ROWS - 2)
+
     def _update_estimates(self) -> None:
         """Refresh the planning label with disk space and duration estimates."""
-        try:
-            size_value = SizeValue(
-                amount=self.size_spin.value(),
-                unit=self.unit_combo.currentText(),
-            )
-            target_bytes = size_value.to_bytes()
-        except ValueError:
-            self.estimate_label.setText("Enter a valid size and unit to compute estimates.")
+        headers = self._parse_headers()
+        if not headers:
+            self.estimate_label.setText("Provide at least one header to calculate estimates.")
             return
 
-        if target_bytes <= 0:
-            self.estimate_label.setText("Increase the target size to view estimates.")
-            return
-
+        filler = self.filler_input.text().strip() or "SampleValue"
+        file_type = str(self.file_type_combo.currentData() or "tsv")
         destination = Path(self.path_edit.text().strip() or Path.home())
-        parent = destination.parent if destination.parent.exists() else Path.home()
+        free_bytes = self._available_disk_bytes(destination)
 
-        try:
-            usage = disk_usage(parent)
-            free_bytes = usage.free
-        except FileNotFoundError:
-            free_bytes = 0
+        status_parts: list[str] = []
+        required_bytes: int | None = None
+        duration_seconds = 0.0
 
-        size_human = self._format_bytes(target_bytes)
-        free_human = self._format_bytes(free_bytes)
-        duration_seconds = self._estimate_duration_seconds(target_bytes)
-        duration_text = self._format_duration(duration_seconds)
+        if self.size_mode_radio.isChecked():
+            try:
+                size_value = SizeValue(
+                    amount=self.size_spin.value(),
+                    unit=self.unit_combo.currentText(),
+                )
+                target_bytes = size_value.to_bytes()
+            except ValueError:
+                self.estimate_label.setText("Enter a valid size and unit to compute estimates.")
+                return
 
-        status_parts = [f"Required: {size_human}"]
-        if free_bytes:
-            status_parts.append(f"Free: {free_human}")
-            if target_bytes > free_bytes:
+            if target_bytes <= 0:
+                self.estimate_label.setText("Increase the target size to view estimates.")
+                return
+
+            tolerance = max(int(target_bytes * 0.02), 5 * MIB)
+            required_bytes = target_bytes + tolerance
+            status_parts.append(f"Required: {self._format_bytes(required_bytes)}")
+            duration_seconds = self._estimate_duration_seconds(target_bytes)
+        else:
+            row_count = int(self.rows_spin.value())
+            if row_count <= 0:
+                self.estimate_label.setText("Row count must be greater than zero.")
+                return
+            required_bytes = self._estimate_row_mode_bytes(
+                file_type=file_type,
+                headers=headers,
+                filler=filler,
+                row_count=row_count,
+            )
+            status_parts.append(f"Row target: {row_count:,}")
+            status_parts.append(f"Approx. size: {self._format_bytes(required_bytes)}")
+            duration_seconds = self._estimate_duration_seconds(required_bytes)
+            if self._exceeds_excel_limit(file_type, row_count):
+                status_parts.append("Warning: exceeds Excel row limit (1,048,574 data rows)")
+
+        if free_bytes is not None:
+            status_parts.append(f"Free: {self._format_bytes(free_bytes)}")
+            if required_bytes is not None and required_bytes > free_bytes:
                 status_parts.append("Insufficient disk space")
         else:
             status_parts.append("Free space unavailable")
 
-        status_parts.append(f"Time est.: {duration_text}")
+        status_parts.append(f"Time est.: {self._format_duration(duration_seconds)}")
         self.estimate_label.setText(" | ".join(status_parts))
 
     def _estimate_duration_seconds(self, target_bytes: int) -> float:

@@ -8,11 +8,11 @@
 
 ## Module Breakdown
 - `src/file_generator/app.py` wires the PyQt6 GUI and application bootstrap code.
-- `src/file_generator/ui/main_window.py` defines the main window, widgets, validation, and progress display. It invokes the service layer without owning business logic and now persists form inputs, surfaces disk/time estimates, and guards against low-space destinations.
+- `src/file_generator/ui/main_window.py` defines the main window, widgets, validation, and progress display. It invokes the service layer without owning business logic and now persists form inputs, surfaces disk/time estimates, supports size-or-row targeting, and guards against low-space destinations.
 - `src/file_generator/ui/workers.py` contains QThread worker classes that execute long-running generation jobs off the GUI thread.
 - `src/file_generator/services/generation_service.py` orchestrates request validation, picks the right file generator, and coordinates progress reporting.
 - `src/file_generator/generators/base.py` declares shared interfaces and simple dataclasses used throughout the generation flow.
-- `src/file_generator/generators/excel.py` streams XLSX/XLSM output using OpenPyXL in write-only mode to keep memory usage low; cancellation checks fire between row batches.
+- `src/file_generator/generators/excel.py` streams XLSX/XLSM output using OpenPyXL in write-only mode to keep memory usage low; cancellation checks fire between row batches and Excel's row limit is enforced with informative warnings.
 - `src/file_generator/generators/delimited.py` writes CSV/TSV/TXT output using binary 4 MiB buffers so the OS handles fewer syscalls while staying memory efficient.
 - `src/file_generator/utils/size_helpers.py` handles unit conversion (KB/MB/GB) and byte accounting; `src/file_generator/utils/rows.py` stores reusable data row helpers and now hashes once per row to populate all cells quickly.
 

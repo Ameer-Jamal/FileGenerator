@@ -38,5 +38,6 @@ class FileGenerationRequest:  # pylint: disable=too-few-public-methods
     file_type: str
     headers: tuple[str, ...]
     row_generator: RowContentGenerator
-    size_constraint: SizeConstraint
+    size_constraint: SizeConstraint | None = None
+    target_rows: int | None = None
     cancel_requested: CancelCallback | None = None

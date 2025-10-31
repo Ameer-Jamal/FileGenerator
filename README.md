@@ -17,7 +17,7 @@ PyQt6 desktop application for creating very large spreadsheet-style files (`.xls
 
 ## Usage
 1. Choose the destination path and desired file type (`.xlsx`, `.xlsm`, `.csv`, `.tsv`, `.txt`).
-2. Specify the maximum size using MB or GB units. The generator will stop once the target is reached (last row may overshoot slightly).
+2. Choose whether to target a maximum size (MB/GB) or a specific number of data rows. Size mode stops once the byte goal is met; row mode stops when the requested count is reached.
 3. Provide the header row as a comma-separated list. The app writes the header, a blank spacer line, then data rows.
 4. Optionally adjust the filler token to change sample data values. Unique row values reduce compression and better simulate production loads.
 5. Click **Generate** to start. Progress updates and disk usage estimates stream into the activity log. Use **Cancel** to stop safely mid-run.
@@ -26,6 +26,7 @@ PyQt6 desktop application for creating very large spreadsheet-style files (`.xls
 
 ## Performance Tuning
 - CSV/TSV/TXT output is the fastest path for stress imports. The generator batches rows into 4 MiB chunks and writes in binary mode; bump throughput further by passing a larger `flush_bytes` value when constructing `DelimitedFileGenerator`.
+- Excel enforces a hard limit of 1,048,576 rows (≈1,048,574 data rows after the header and spacer). The GUI warns and truncates when a row target exceeds that cap—switch to CSV/TXT for very large datasets.
 - Excel formats depend on OpenPyXL. Keep row counts realistic and prefer TSV when you only need file size validation—the PyQt UI can still invoke the TSV generator while saving with an `.xlsm` suffix if you must exercise that extension in downstream systems.
 - The default row generator now hashes once per row and slices fragments per column, dramatically cutting CPU time while still emitting high-entropy data that resists compression.
 - When chasing multi‑gigabyte targets, place output on SSD/NVMe storage and run the app from a virtual environment compiled against optimized Python (3.12+). Disk IO remains the limiting factor once CPU costs are trimmed.

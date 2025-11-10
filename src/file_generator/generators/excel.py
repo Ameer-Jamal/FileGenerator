@@ -42,40 +42,61 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
         estimated_bytes = 0
         destination = Path(request.destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-
-        workbook = Workbook(write_only=True)
-        sheet = workbook.create_sheet(title="Data")
+        ignore_excel_limit = getattr(request, "ignore_excel_row_limit", False)
 
         header_row = list(request.row_generator.header_row(request.headers))
-        sheet.append(header_row)
-        header_bytes = _estimate_row_bytes(header_row)
-        estimated_bytes += header_bytes
-        if tracker:
-            tracker.register(header_bytes)
-
         spacer_row = ["" for _ in header_row]
-        sheet.append(spacer_row)
-        spacer_bytes = _estimate_row_bytes(spacer_row)
-        estimated_bytes += spacer_bytes
-        if tracker:
-            tracker.register(spacer_bytes)
+        workbook = Workbook(write_only=True)
+        sheet = None
+        sheet_row_count = 0
+        sheet_index = 0
+        excel_limit_enforced = False
 
+        def start_new_sheet() -> str:
+            nonlocal sheet, sheet_row_count, sheet_index, estimated_bytes
+            sheet_index += 1
+            title = "Data" if sheet_index == 1 else f"Data {sheet_index}"
+            sheet = workbook.create_sheet(title=title)
+            sheet.append(header_row)
+            header_bytes = _estimate_row_bytes(header_row)
+            estimated_bytes += header_bytes
+            if tracker:
+                tracker.register(header_bytes)
+            sheet.append(spacer_row)
+            spacer_bytes = _estimate_row_bytes(spacer_row)
+            estimated_bytes += spacer_bytes
+            if tracker:
+                tracker.register(spacer_bytes)
+            sheet_row_count = 2
+            return title
+
+        current_sheet_title = start_new_sheet()
         initial_percent = tracker.percent_complete() if tracker else -1.0
-        progress("Starting Excel generation", percent_complete=initial_percent)
+        progress(
+            f"Starting Excel generation in sheet '{current_sheet_title}'",
+            percent_complete=initial_percent,
+        )
 
         rows_written = 0
-        total_rows = 2  # header + spacer already appended
         data_rows_written = 0
         target_rows = request.target_rows
-        max_data_rows = MAX_EXCEL_ROWS - total_rows
-        requested_rows = target_rows if target_rows is not None else None
 
         for rows_written, row in enumerate(
             request.row_generator.data_rows(headers=request.headers), start=1
         ):
             if request.cancel_requested and request.cancel_requested():
                 raise GenerationCancelledError("Generation cancelled by user.")
-            if total_rows >= MAX_EXCEL_ROWS:
+            if sheet_row_count >= MAX_EXCEL_ROWS:
+                if ignore_excel_limit:
+                    previous_sheet = sheet.title if sheet else "Data"
+                    next_sheet_title = start_new_sheet()
+                    progress(
+                        f"Excel row limit reached in '{previous_sheet}'. "
+                        f"Continuing in '{next_sheet_title}'.",
+                        percent_complete=tracker.percent_complete() if tracker else -1.0,
+                    )
+                    continue
+                excel_limit_enforced = True
                 progress(
                     "Excel row limit reached (1,048,576 rows); stopping early.",
                     percent_complete=tracker.percent_complete() if tracker else -1.0,
@@ -94,7 +115,7 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
                     f"(estimated {estimated:,} bytes)",
                     percent_complete=tracker.percent_complete() if tracker else -1.0,
                 )
-            total_rows += 1
+            sheet_row_count += 1
             data_rows_written += 1
             if tracker and not tracker.should_continue():
                 break
@@ -110,11 +131,7 @@ class ExcelFileGenerator(FileGenerator):  # pylint: disable=too-few-public-metho
                 "output is smaller than requested.",
                 percent_complete=tracker.percent_complete(),
             )
-        if (
-            target_rows is not None
-            and data_rows_written < target_rows
-            and (requested_rows is None or requested_rows > max_data_rows)
-        ):
+        if target_rows is not None and data_rows_written < target_rows and excel_limit_enforced:
             progress(
                 "Requested row count exceeds Excel's 1,048,576-row limit; output truncated.",
                 percent_complete=tracker.percent_complete() if tracker else -1.0,

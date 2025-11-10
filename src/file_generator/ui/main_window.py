@@ -10,6 +10,7 @@ try:
     from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import (
         QButtonGroup,
+        QCheckBox,
         QComboBox,
         QFileDialog,
         QFormLayout,
@@ -124,6 +125,11 @@ class MainWindow(QMainWindow):
         self.rows_spin.setEnabled(False)
         layout.addRow(QLabel("Row Count"), self.rows_spin)
 
+        self.ignore_excel_limit_checkbox = QCheckBox(
+            "Ignore Excel row limits and create new sheets automatically"
+        )
+        layout.addRow(QLabel("Excel Limits"), self.ignore_excel_limit_checkbox)
+
         # Header row input
         self.headers_input = QPlainTextEdit()
         self.headers_input.setPlaceholderText(
@@ -190,9 +196,11 @@ class MainWindow(QMainWindow):
             self.headers_input,
             self.filler_input,
             self.filler_help_button,
+            self.ignore_excel_limit_checkbox,
         ]
 
         self.setCentralWidget(container)
+        self._update_excel_limit_checkbox()
 
     def _connect_signals(self) -> None:
         self.browse_button.clicked.connect(self._browse_for_path)
@@ -216,6 +224,7 @@ class MainWindow(QMainWindow):
             new_path = current_path.with_suffix(suffix)
             self.path_edit.setText(str(new_path))
         self._on_parameters_changed()
+        self._update_excel_limit_checkbox()
 
     def _browse_for_path(self) -> None:
         selected_extension = self.file_type_combo.currentData()
@@ -291,6 +300,7 @@ class MainWindow(QMainWindow):
             raise ValueError("Provide at least one header value.")
 
         filler = self.filler_input.text().strip() or "SampleValue"
+        ignore_excel_limit = self.ignore_excel_limit_checkbox.isChecked()
         size_constraint: SizeConstraint | None = None
         target_rows: int | None = None
         required_bytes: int | None = None
@@ -309,7 +319,7 @@ class MainWindow(QMainWindow):
             target_rows = int(self.rows_spin.value())
             if target_rows <= 0:
                 raise ValueError("Target row count must be greater than zero.")
-            if self._exceeds_excel_limit(target_file_type, target_rows):
+            if self._exceeds_excel_limit(target_file_type, target_rows) and not ignore_excel_limit:
                 raise ValueError(
                     "Excel workbooks support up to 1,048,574 data rows. Select a smaller row "
                     "count or switch to CSV/TXT."
@@ -333,6 +343,7 @@ class MainWindow(QMainWindow):
             size_constraint=size_constraint,
             target_rows=target_rows,
             cancel_requested=lambda: self._cancel_flag,
+            ignore_excel_row_limit=ignore_excel_limit,
         )
 
     def _split_header_input(self, text: str) -> Iterable[str]:
@@ -405,6 +416,27 @@ class MainWindow(QMainWindow):
         self.size_spin.setEnabled(size_mode)
         self.unit_combo.setEnabled(size_mode)
         self.rows_spin.setEnabled(not size_mode)
+        self._update_excel_limit_checkbox()
+
+    def _update_excel_limit_checkbox(self) -> None:
+        """Enable/disable the Excel override checkbox as file type changes."""
+        selected_type = str(self.file_type_combo.currentData() or "").lower()
+        is_excel = selected_type in {"xlsx", "xlsm"}
+        self.ignore_excel_limit_checkbox.setEnabled(is_excel)
+        if is_excel:
+            self.ignore_excel_limit_checkbox.setToolTip(
+                (
+                    "Excel worksheets cannot exceed 1,048,576 total rows per sheet "
+                    "(~1,048,574 data rows after headers/spacer). Checking this "
+                    "option tells the generator to start a new sheet automatically "
+                    "whenever the limit is hit so very large datasets can span "
+                    "multiple sheets."
+                )
+            )
+        else:
+            self.ignore_excel_limit_checkbox.setToolTip(
+                "Excel row limits only apply to .xlsx and .xlsm outputs."
+            )
 
     def _on_parameters_changed(self, *_: object) -> None:
         """Persist inputs and update estimates when any parameter changes."""
@@ -419,44 +451,67 @@ class MainWindow(QMainWindow):
         self.size_spin.valueChanged.connect(self._on_parameters_changed)
         self.unit_combo.currentIndexChanged.connect(self._on_parameters_changed)
         self.rows_spin.valueChanged.connect(self._on_parameters_changed)
+        self.ignore_excel_limit_checkbox.stateChanged.connect(self._on_parameters_changed)
 
     def _load_settings(self) -> None:
         """Restore the last-used configuration from persistent storage."""
-        self.path_edit.setText(self._settings.value("output_path", "", str))
+        stored_path = self._settings.value("output_path", "")
+        if stored_path:
+            self.path_edit.blockSignals(True)
+            self.path_edit.setText(stored_path)
+            self.path_edit.blockSignals(False)
 
-        stored_type = self._settings.value("file_type", "", str)
+        stored_type = self._settings.value("file_type", "")
         type_index = self.file_type_combo.findData(stored_type)
         if type_index >= 0:
+            self.file_type_combo.blockSignals(True)
             self.file_type_combo.setCurrentIndex(type_index)
+            self.file_type_combo.blockSignals(False)
 
-        stored_size = self._settings.value("target_size", None, float)
+        stored_size = self._settings.value("target_size", None)
         if stored_size is not None and stored_size > 0:
             self.size_spin.blockSignals(True)
             self.size_spin.setValue(stored_size)
             self.size_spin.blockSignals(False)
 
-        stored_unit = self._settings.value("size_unit", "", str)
+        stored_unit = self._settings.value("size_unit", "")
         unit_index = self.unit_combo.findText(stored_unit) if stored_unit else -1
         if unit_index >= 0:
             self.unit_combo.blockSignals(True)
             self.unit_combo.setCurrentIndex(unit_index)
             self.unit_combo.blockSignals(False)
 
-        stored_rows = self._settings.value("target_rows", None, int)
+        stored_rows = self._settings.value("target_rows", None)
         if stored_rows is not None and stored_rows > 0:
             self.rows_spin.blockSignals(True)
             self.rows_spin.setValue(stored_rows)
             self.rows_spin.blockSignals(False)
 
-        stored_mode = self._settings.value("target_mode", "size", str)
+        stored_mode = self._settings.value("target_mode", "size")
         if stored_mode == "rows":
             self.rows_mode_radio.setChecked(True)
         else:
             self.size_mode_radio.setChecked(True)
         self._apply_mode_ui()
 
-        self.headers_input.setPlainText(self._settings.value("headers", "", str))
-        self.filler_input.setText(self._settings.value("filler_token", "SampleValue", str))
+        stored_headers = self._settings.value("headers", "")
+        self.headers_input.blockSignals(True)
+        self.headers_input.setPlainText(stored_headers)
+        self.headers_input.blockSignals(False)
+
+        stored_filler = self._settings.value("filler_token", "SampleValue")
+        self.filler_input.blockSignals(True)
+        self.filler_input.setText(stored_filler)
+        self.filler_input.blockSignals(False)
+        stored_ignore = self._settings.value("ignore_excel_limit", False)
+        if isinstance(stored_ignore, str):
+            ignore_flag = stored_ignore.lower() in {"1", "true", "yes", "on"}
+        else:
+            ignore_flag = bool(stored_ignore)
+        self.ignore_excel_limit_checkbox.blockSignals(True)
+        self.ignore_excel_limit_checkbox.setChecked(ignore_flag)
+        self.ignore_excel_limit_checkbox.blockSignals(False)
+        self._update_excel_limit_checkbox()
         self._update_estimates()
 
     def _save_settings(self, *_: object) -> None:
@@ -471,6 +526,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("target_rows", int(self.rows_spin.value()))
         self._settings.setValue("headers", self.headers_input.toPlainText().strip())
         self._settings.setValue("filler_token", self.filler_input.text().strip())
+        self._settings.setValue(
+            "ignore_excel_limit", self.ignore_excel_limit_checkbox.isChecked()
+        )
         self._settings.sync()
 
     def _ensure_disk_space(self, destination: Path, required_bytes: int | None) -> None:
@@ -588,7 +646,15 @@ class MainWindow(QMainWindow):
             status_parts.append(f"Approx. size: {self._format_bytes(required_bytes)}")
             duration_seconds = self._estimate_duration_seconds(required_bytes)
             if self._exceeds_excel_limit(file_type, row_count):
-                status_parts.append("Warning: exceeds Excel row limit (1,048,574 data rows)")
+                if self.ignore_excel_limit_checkbox.isChecked():
+                    status_parts.append(
+                        "Notice: exceeds Excel row limit; additional sheets will be created "
+                        "(~1,048,574 rows per sheet)"
+                    )
+                else:
+                    status_parts.append(
+                        "Warning: exceeds Excel row limit (1,048,574 data rows)"
+                    )
 
         if free_bytes is not None:
             status_parts.append(f"Free: {self._format_bytes(free_bytes)}")

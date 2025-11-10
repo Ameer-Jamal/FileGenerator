@@ -41,3 +41,4 @@ class FileGenerationRequest:  # pylint: disable=too-few-public-methods
     size_constraint: SizeConstraint | None = None
     target_rows: int | None = None
     cancel_requested: CancelCallback | None = None
+    ignore_excel_row_limit: bool = False
